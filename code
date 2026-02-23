@@ -1,0 +1,156 @@
+# ==========================
+# 0) Install dependencies
+# ==========================
+!pip install -q tensorflow gradio
+
+# ==========================
+# 1) Upload and extract dataset
+# ==========================
+from google.colab import files
+import zipfile, os
+print("Upload algae_dataset_images.zip")
+uploaded = files.upload()
+
+for fn in uploaded.keys():
+    with zipfile.ZipFile(fn, 'r') as z:
+        z.extractall("/content/algae_dataset")
+
+train_dir = "/content/algae_dataset/train"
+val_dir   = "/content/algae_dataset/val"
+print("Classes available:", os.listdir(train_dir))
+
+# ==========================
+# 2) Imports
+# ==========================
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras import layers, models
+import numpy as np
+from PIL import Image
+import gradio as gr
+
+# ==========================
+# 3) Data generators
+# ==========================
+IMG_SIZE = (128,128)
+BATCH = 8
+
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    horizontal_flip=True,
+    brightness_range=(0.8,1.2)
+)
+val_datagen = ImageDataGenerator(rescale=1./255)
+
+train_gen = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH,
+    class_mode='categorical',
+    shuffle=True
+)
+val_gen = val_datagen.flow_from_directory(
+    val_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH,
+    class_mode='categorical',
+    shuffle=False
+)
+
+inv_map = {v:k for k,v in train_gen.class_indices.items()}
+class_names = [inv_map[i] for i in range(len(inv_map))]
+print("Classes:", class_names)
+
+# ==========================
+# 4) Toxicity + description + detailed precautions
+# ==========================
+algae_info = {
+    "Microcystis": {
+        "toxicity":"Toxic",
+        "description":"A cyanobacteria producing microcystins harmful to the liver.",
+        "instructions":"- Avoid drinking contaminated water.\n- Do not swim in affected water bodies.\n- Use water treatment methods (e.g., activated carbon filtration) for safety.\n- Monitor water regularly for algal bloom.\n- Remove algae using safe algaecides in ponds."
+    },
+    "Anabaena": {
+        "toxicity":"Toxic",
+        "description":"Cyanobacteria capable of producing neurotoxins.",
+        "instructions":"- Avoid skin contact and ingestion.\n- Treat water with activated carbon or UV to remove toxins.\n- Remove contaminated water from tanks or ponds.\n- Use personal protective equipment when handling blooms.\n- Alert local water authorities if found in natural water bodies."
+    },
+    "Chlorella": {
+        "toxicity":"Non-Toxic",
+        "description":"Green algae often used as a dietary supplement.",
+        "instructions":"- Safe for consumption.\n- Can be cultivated for biomass or nutritional supplements.\n- Ensure water used is clean and free from contaminants."
+    },
+    "Scenedesmus": {
+        "toxicity":"Non-Toxic",
+        "description":"Common freshwater green algae; non-toxic.",
+        "instructions":"- Safe for handling.\n- Can be used for biofuel production or water purification.\n- Monitor water to prevent excessive growth which may affect water quality."
+    },
+    "Oscillatoria": {
+        "toxicity":"Toxic",
+        "description":"Filamentous cyanobacteria producing toxins in water.",
+        "instructions":"- Avoid ingestion or skin contact.\n- Remove algae carefully from water bodies.\n- Monitor and control water ecosystems for cyanotoxins.\n- Use algaecides only if necessary and follow safety protocols.\n- Keep pets and livestock away from affected water."
+    }
+}
+
+# ==========================
+# 5) Build Transfer Learning Model
+# ==========================
+base_model = MobileNetV2(input_shape=(128,128,3), include_top=False, weights='imagenet')
+base_model.trainable = False
+
+model = models.Sequential([
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dropout(0.3),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.2),
+    layers.Dense(len(class_names), activation='softmax')
+])
+
+model.compile(optimizer='adam',
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# ==========================
+# 6) Train the model
+# ==========================
+EPOCHS = 5
+history = model.fit(train_gen, epochs=EPOCHS, validation_data=val_gen)
+
+# ==========================
+# 7) Gradio predict function
+# ==========================
+def predict_algae(img):
+    img = img.convert("RGB").resize(IMG_SIZE)
+    arr = np.array(img)/255.0
+    arr = np.expand_dims(arr,0)
+    pred = model.predict(arr)[0]
+   
+    best_idx = np.argmax(pred)
+    best_class = class_names[best_idx]
+   
+    info = algae_info.get(best_class, {"toxicity":"Unknown","description":"No info","instructions":"No instructions"})
+   
+    output = f"🌿 Predicted Algae Type: {best_class}\n"
+    output += f"💉 Toxicity: {info['toxicity']}\n"
+    output += f"📝 Description: {info['description']}\n"
+    output += f"⚠️ Precautions & Recommended Actions:\n{info['instructions']}"
+   
+    return output
+
+# ==========================
+# 8) Launch Gradio UI
+# ==========================
+iface = gr.Interface(
+    fn=predict_algae,
+    inputs=gr.Image(type="pil"),
+    outputs=gr.Textbox(lines=12, placeholder="Prediction will appear here...", label="Algae Classification Result"),
+    title="🌿 Algae Type & Toxicity Classifier",
+    description="Upload an algae image. The system predicts the algae type, its toxicity, provides a description, and detailed precautions."
+)
+
+iface.launch(share=True)
